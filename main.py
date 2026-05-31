@@ -19,15 +19,9 @@ from src.test import ModelEvaluator
 
 def cmd_train(args):
     proc = DataProcessor(args.input)
-    df = proc.preprocess()  # in-memory only
+    df = proc.preprocess()
     trainer = ChurnTrainer(df=df, random_state=args.random_state, test_size=args.test_size)
-    if args.quick:
-        # instruct trainer to use smaller grids if attribute exists
-        try:
-            trainer.use_quick_mode = True
-        except Exception:
-            pass
-    trainer.run_all(train_xgb=True, train_lgbm=True, train_dt=True, build_voting=True)
+    trainer.run_all(train_xgb=True, train_lgbm=True, train_dt=True, build_voting=True, quick=args.quick)
     print("Training finished.")
 
 

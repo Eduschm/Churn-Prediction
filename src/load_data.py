@@ -1,6 +1,4 @@
-import warnings
-warnings.filterwarnings('ignore')
-
+import os
 import pandas as pd
 import numpy as np
 
@@ -10,14 +8,15 @@ class DataProcessor:
     Load a CSV and run preprocessing steps, returning the processed DataFrame.
     Steps:
       - read CSV
+      - drop customerID if present
       - coerce TotalCharges to numeric
       - create tenure_group bins
       - compute avg_monthly_spend, contract_value, low_charge
       - apply log1p transform to selected numeric features
     No plotting performed.
     """
-    def __init__(self, filepath=r'data\dataset.csv'):
-        self.filepath = filepath
+    def __init__(self, filepath=None):
+        self.filepath = filepath or os.path.join('data', 'dataset.csv')
         self.df = None
 
     def load(self):
@@ -67,13 +66,14 @@ class DataProcessor:
         self.load()
         for col in cols:
             if col in self.df.columns:
-                # np.log1p handles NaN correctly
                 self.df[col] = np.log1p(self.df[col])
         return self.df
 
     def preprocess(self):
         """Run the full preprocessing pipeline and return the processed DataFrame."""
         self.load()
+        if 'customerID' in self.df.columns:
+            self.df = self.df.drop(columns=['customerID'])
         self.convert_total_charges()
         self.create_features()
         self.log_transform(['TotalCharges', 'MonthlyCharges', 'avg_monthly_spend', 'contract_value'])
@@ -85,6 +85,6 @@ class DataProcessor:
 
 
 if __name__ == "__main__":
-    processor = DataProcessor(r'data\dataset.csv')
+    processor = DataProcessor()
     processed_df = processor.preprocess()
     print(processed_df.head())

@@ -1,7 +1,9 @@
-name: Publish Model Metrics
+name: CI/CD Pipeline
 
 on:
   push:
+    branches: [ main ]
+  pull_request:
     branches: [ main ]
 
 permissions:
@@ -9,8 +11,27 @@ permissions:
   pull-requests: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install core dependencies
+        run: |
+          pip install scikit-learn xgboost lightgbm imbalanced-learn \
+            pandas numpy skops seaborn matplotlib pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
   publish-metrics:
     runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +49,7 @@ jobs:
           echo "Recall: $(jq -r '.Score.Recall' results/metrics.json)" >> report.md
           echo "F1-Score: $(jq -r '.Score[\"F1-Score\"]' results/metrics.json)" >> report.md
           echo "ROC-AUC: $(jq -r '.Score[\"ROC-AUC\"]' results/metrics.json)" >> report.md
-          echo "*New model artifact created and tested.*" >> report.md
+          echo "*Model artifact tested and validated.*" >> report.md
 
       - name: Publish Report
         env:

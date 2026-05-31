@@ -1,4 +1,3 @@
-# /c:/Projects/CICD/src/test.py
 import os
 from typing import Optional, Any
 
@@ -14,18 +13,18 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
     roc_auc_score,
+    average_precision_score,
 )
 
-# load model saved with skops
 try:
     from skops import io as skops_io
 except Exception:
-    skops_io = None  
+    skops_io = None
 
 
 class ModelEvaluator:
     """
-    Loads a single model (skops format) and provides simple classification metrics
+    Loads a single model (skops format) and provides classification metrics
     and a confusion-matrix visualization.
 
     Usage:
@@ -34,38 +33,28 @@ class ModelEvaluator:
       metrics = evaluator.evaluate(X_test, y_test, plot_cm=True)
     """
 
-    def __init__(self, model_path: str = "models/model.skops"):
+    def __init__(self, model_path: str = "models/model.skops", output_dir: str = "results"):
         self.model_path = model_path
+        self.output_dir = output_dir
         self.model: Optional[Any] = None
         self.y_pred: Optional[np.ndarray] = None
         self.y_proba: Optional[np.ndarray] = None
         self.metrics_df: Optional[pd.DataFrame] = None
-        self.trusted_types = [
-            "lightgbm.sklearn.LGBMClassifier",
-            "xgboost.sklearn.XGBClassifier",
-            "imblearn.pipeline.Pipeline",
-            "imblearn.over_sampling._smote.base.SMOTE",
-            'collections.OrderedDict', 
-            'lightgbm.basic.Booster', 
-            'numpy.dtype', 
-            'scipy.sparse._csr.csr_matrix', 
-            'sklearn.utils._bunch.Bunch', 
-            'xgboost.core.Booster'
-        ]
 
     def load_model(self):
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
         if skops_io is None:
-            raise RuntimeError("skops.io not available. Install scikit-learn-skbio/skops.")
-        self.model = skops_io.load(self.model_path, trusted=self.trusted_types)
+            raise RuntimeError("skops.io not available. Install skops.")
+        # Discover all types stored in the file and trust them — these are our own artifacts.
+        trusted = skops_io.get_untrusted_types(file=self.model_path)
+        self.model = skops_io.load(self.model_path, trusted=trusted)
         return self.model
 
     def predict(self, X):
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         self.y_pred = np.asarray(self.model.predict(X))
-        # try predict_proba for ROC-AUC if available
         if hasattr(self.model, "predict_proba"):
             try:
                 self.y_proba = np.asarray(self.model.predict_proba(X)[:, 1])
@@ -83,17 +72,20 @@ class ModelEvaluator:
         rec = recall_score(y_true, self.y_pred, zero_division=0)
         f1 = f1_score(y_true, self.y_pred, zero_division=0)
         roc_auc = None
+        pr_auc = None
         if self.y_proba is not None:
             try:
                 roc_auc = roc_auc_score(y_true, self.y_proba)
+                pr_auc = average_precision_score(y_true, self.y_proba)
             except Exception:
-                roc_auc = None
+                pass
         metrics = {
             "Accuracy": acc,
             "Precision": prec,
             "Recall": rec,
             "F1-Score": f1,
             "ROC-AUC": roc_auc,
+            "PR-AUC": pr_auc,
         }
         self.metrics_df = pd.DataFrame.from_dict(metrics, orient="index", columns=["Score"])
         return self.metrics_df
@@ -125,28 +117,21 @@ class ModelEvaluator:
         return ax
 
     def evaluate(self, X, y, plot_cm: bool = True, normalize_cm: bool = False):
-        """
-        Convenience method: runs prediction, computes metrics and optionally plots CM.
-        Returns the metrics DataFrame.
-        """
+        """Run prediction, compute metrics, optionally plot CM, and save metrics JSON."""
         self.predict(X)
         metrics = self.compute_metrics(y)
         if plot_cm:
             self.plot_confusion_matrix(y, normalize=normalize_cm)
             plt.show()
-        metrics.to_json("results/metrics.json")
-
+        os.makedirs(self.output_dir, exist_ok=True)
+        metrics.to_json(os.path.join(self.output_dir, "metrics.json"))
         return metrics
 
 
-
-
 if __name__ == "__main__":
-    # create a simple test dataset and provide a fallback model if loading fails
+    import warnings
     from sklearn.datasets import make_classification
     from sklearn.dummy import DummyClassifier
-    
-    import warnings 
 
     warnings.filterwarnings("ignore")
 
@@ -160,13 +145,10 @@ if __name__ == "__main__":
     )
 
     evaluator = ModelEvaluator("models/model.skops")
-  
+
     try:
         evaluator.load_model()
     except Exception:
-        # If the saved model is not available or skops isn't installed, use a simple fallback
         dummy = DummyClassifier(strategy="most_frequent")
         dummy.fit(X_test, y_test)
         evaluator.model = dummy
-
-

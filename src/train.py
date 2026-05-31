@@ -7,7 +7,12 @@ from typing import Dict, Any, Optional
 
 from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_curve,
+    average_precision_score,
+)
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -44,6 +49,7 @@ class ChurnTrainer:
 
         os.makedirs(self.model_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
+        os.makedirs(self.config_dir, exist_ok=True)
 
         # default numerical features if not provided
         self.numerical_features = numerical_features or [
@@ -76,7 +82,7 @@ class ChurnTrainer:
         self.voting_classifier = None
         self.voting_threshold = None
 
-        # loaded saved params (for --quick)
+        # loaded saved params (for quick mode)
         self.saved_best_params: Dict[str, Dict[str, str]] = {}
 
     # Preprocessing
@@ -169,9 +175,9 @@ class ChurnTrainer:
             },
         }
 
- 
+
     # Data split
-  
+
     def split(self):
         X = self.df.drop(self.target_col, axis=1)
         y = self.df[self.target_col].map({"No": 0, "Yes": 1}).astype(int)
@@ -183,7 +189,7 @@ class ChurnTrainer:
             stratify=y,
         )
 
- 
+
     # Training
 
     def _run_grid_search(
@@ -206,30 +212,25 @@ class ChurnTrainer:
         self.best_params[name] = {k: str(v) for k, v in grid.best_params_.items()}
         return grid
 
-    # Helper to parse saved param string back to python value
     def _parse_param_value(self, s: str):
         if s is None:
             return None
         if isinstance(s, (int, float, bool, dict, list)):
             return s
-        # explicit None
         if s == "None":
             return None
-        # try JSON
         try:
             return json.loads(s)
         except Exception:
             pass
-        # try ast
         try:
             return ast.literal_eval(s)
         except Exception:
             pass
-        # fallback to original string
         return s
 
     def load_saved_params(self, path: Optional[str] = None):
-        path = path or os.path.join(self.results_dir, "best_params.json")
+        path = path or os.path.join(self.config_dir, "best_params.json")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Saved params not found at {path}")
         with open(path, "r") as f:
@@ -245,12 +246,10 @@ class ChurnTrainer:
             raise ValueError(f"No saved params for model '{name}' in loaded best_params.json")
         pipeline = self.pipelines[name]
         raw_params = self.saved_best_params[name]
-        # convert string values back to proper types
         params = {k: self._parse_param_value(v) for k, v in raw_params.items()}
         pipeline.set_params(**params)
         pipeline.fit(self.X_train, self.y_train)
         self.best_models[name] = pipeline
-        # keep the loaded (string) representation as best_params
         self.best_params[name] = raw_params
         return pipeline
 
@@ -267,13 +266,20 @@ class ChurnTrainer:
         print(classification_report(self.y_test, y_pred))
         print("\nConfusion Matrix:")
         print(confusion_matrix(self.y_test, y_pred))
+        if hasattr(model, "predict_proba"):
+            try:
+                y_proba = model.predict_proba(self.X_test)[:, 1]
+                pr_auc = average_precision_score(self.y_test, y_proba)
+                print(f"PR-AUC: {pr_auc:.4f}")
+            except Exception:
+                pass
 
 
     # Deployment-ready saving
 
     def _get_fitted_components(self, name: str):
         """
-        Helper: Returns fitted (preprocessor, classifier) from the best model pipeline.
+        Returns fitted (preprocessor, classifier) from the best model pipeline.
         Assumes self.best_models[name] is an ImbPipeline with steps:
         preprocessor -> smote -> classifier
         """
@@ -286,54 +292,31 @@ class ChurnTrainer:
         return preprocessor, classifier
 
     def save_dt_model(self, filename: str = "model_dt.skops"):
-        """
-        Save a pure sklearn deployment pipeline (preprocessor + DecisionTreeClassifier)
-        using skops (safe format).
-        """
+        """Save a pure sklearn deployment pipeline (no SMOTE) using skops."""
         preprocessor, classifier = self._get_fitted_components("dt")
-
-        # Deployment pipeline (no SMOTE, no ImbPipeline)
         deployment_pipeline = Pipeline(
-            [
-                ("preprocessor", preprocessor),
-                ("classifier", classifier),
-            ]
+            [("preprocessor", preprocessor), ("classifier", classifier)]
         )
-
         path = os.path.join(self.model_dir, filename)
         skio.dump(deployment_pipeline, path)
         print(f"Decision Tree deployment model saved to: {path}")
         return path
 
     def save_xgb_model(self, filename: str = "model_xgb.skops"):
-    
         preprocessor, classifier = self._get_fitted_components("xgb")
-
-        # Create deployment pipeline (no SMOTE)
         deployment_pipeline = Pipeline(
-            [
-                ("preprocessor", preprocessor),
-                ("classifier", classifier),
-            ]
+            [("preprocessor", preprocessor), ("classifier", classifier)]
         )
-
         path = os.path.join(self.model_dir, filename)
         skio.dump(deployment_pipeline, path)
         print(f"XGBoost deployment model saved to: {path}")
         return path
 
     def save_lgbm_model(self, filename: str = "model_lgbm.skops"):
-
         preprocessor, classifier = self._get_fitted_components("lgbm")
-
-        # Create deployment pipeline (no SMOTE)
         deployment_pipeline = Pipeline(
-            [
-                ("preprocessor", preprocessor),
-                ("classifier", classifier),
-            ]
+            [("preprocessor", preprocessor), ("classifier", classifier)]
         )
-
         path = os.path.join(self.model_dir, filename)
         skio.dump(deployment_pipeline, path)
         print(f"LightGBM deployment model saved to: {path}")
@@ -348,7 +331,7 @@ class ChurnTrainer:
     # Voting classifier
 
     def build_voting_classifier(self, max_fpr: float = 0.1):
-        """Build and train a voting classifier from the best individual models."""
+        """Build and train a soft-voting ensemble from the best individual models."""
         required_models = ["xgb", "dt", "lgbm"]
         for model_name in required_models:
             if model_name not in self.best_models:
@@ -361,7 +344,6 @@ class ChurnTrainer:
         print("Building Voting Classifier (PREFERRED MODEL)...")
         print("=" * 60)
 
-        # Soft voting over the best pipelines
         self.voting_classifier = VotingClassifier(
             estimators=[
                 ("xgb", self.best_models["xgb"]),
@@ -371,7 +353,6 @@ class ChurnTrainer:
             voting="soft",
         )
 
-        # Train voting classifier
         print("Training voting classifier...")
         self.voting_classifier.fit(self.X_train, self.y_train)
 
@@ -383,16 +364,15 @@ class ChurnTrainer:
         print("\nConfusion Matrix:")
         print(confusion_matrix(self.y_test, y_pred_voting))
 
-        # Calculate optimal threshold for max FPR
-        voting_pred_proba = self.voting_classifier.predict_proba(self.X_test)[:, 1]
-        fpr_voting, tpr_voting, thresholds = roc_curve(
-            self.y_test, voting_pred_proba
-        )
+        # Find optimal threshold using training-set predictions to avoid test leakage.
+        # Using training probabilities is a conservative estimate; for a stricter approach
+        # hold out a dedicated validation split before calling this method.
+        train_proba = self.voting_classifier.predict_proba(self.X_train)[:, 1]
+        fpr_train, _tpr_train, thresholds = roc_curve(self.y_train, train_proba)
 
-        # Find threshold for max FPR
         threshold_index = next(
-            (i for i, fpr in enumerate(fpr_voting) if fpr > max_fpr),
-            len(fpr_voting) - 1,
+            (i for i, fpr in enumerate(fpr_train) if fpr > max_fpr),
+            len(fpr_train) - 1,
         )
         self.voting_threshold = thresholds[threshold_index]
         print(
@@ -400,16 +380,16 @@ class ChurnTrainer:
             f"{self.voting_threshold:.4f}"
         )
 
-        # Evaluate with threshold
-        y_pred_voting_thresholded = (
-            voting_pred_proba >= self.voting_threshold
-        ).astype(int)
+        # Evaluate on test set with chosen threshold
+        voting_pred_proba = self.voting_classifier.predict_proba(self.X_test)[:, 1]
+        y_pred_voting_thresholded = (voting_pred_proba >= self.voting_threshold).astype(int)
         print("\nClassification Report with Thresholding:")
         print(classification_report(self.y_test, y_pred_voting_thresholded))
         print("\nConfusion Matrix with Thresholding:")
         print(confusion_matrix(self.y_test, y_pred_voting_thresholded))
+        pr_auc = average_precision_score(self.y_test, voting_pred_proba)
+        print(f"PR-AUC: {pr_auc:.4f}")
 
-        # Save voting classifier as the preferred model
         self.save_voting_classifier()
 
     def save_voting_classifier(self, filename: str = "model.skops"):
@@ -423,7 +403,6 @@ class ChurnTrainer:
         skio.dump(self.voting_classifier, path)
         print(f"\nPreferred model (Voting Classifier) saved to: {path}")
 
-        # Also save the threshold
         threshold_path = os.path.join(self.results_dir, "voting_threshold.json")
         with open(threshold_path, "w") as f:
             json.dump({"threshold": float(self.voting_threshold)}, f, indent=2)
@@ -441,12 +420,17 @@ class ChurnTrainer:
         train_dt: bool = True,
         build_voting: bool = True,
         max_fpr: float = 0.1,
-        quick: bool = True,
+        quick: bool = False,
     ):
-        # prepare splits
+        """
+        Train all models.
+
+        Args:
+            quick: If True, skip grid search and fit using saved params from
+                   config/best_params.json. If False (default), run full GridSearchCV.
+        """
         self.split()
 
-        # if quick, load saved best params
         if quick:
             self.load_saved_params()
 
@@ -455,9 +439,9 @@ class ChurnTrainer:
             print("Training XGBoost...")
             print("=" * 60)
             if quick:
-                _ = self._apply_saved_params_and_fit("xgb")
+                self._apply_saved_params_and_fit("xgb")
             else:
-                _ = self._run_grid_search(
+                self._run_grid_search(
                     "xgb",
                     scoring=["recall", "roc_auc", "f1", "accuracy", "precision"],
                 )
@@ -469,11 +453,9 @@ class ChurnTrainer:
             print("Training Decision Tree...")
             print("=" * 60)
             if quick:
-                _ = self._apply_saved_params_and_fit("dt")
+                self._apply_saved_params_and_fit("dt")
             else:
-                _ = self._run_grid_search(
-                    "dt", scoring=["recall", "roc_auc", "f1"]
-                )
+                self._run_grid_search("dt", scoring=["recall", "roc_auc", "f1"])
             self.evaluate("dt")
             self.save_dt_model()
 
@@ -482,15 +464,12 @@ class ChurnTrainer:
             print("Training LightGBM...")
             print("=" * 60)
             if quick:
-                _ = self._apply_saved_params_and_fit("lgbm")
+                self._apply_saved_params_and_fit("lgbm")
             else:
-                _ = self._run_grid_search(
-                    "lgbm", scoring=["recall", "roc_auc", "f1"]
-                )
+                self._run_grid_search("lgbm", scoring=["recall", "roc_auc", "f1"])
             self.evaluate("lgbm")
             self.save_lgbm_model()
 
-        # Build voting classifier if requested
         if build_voting and all([train_xgb, train_lgbm, train_dt]):
             self.build_voting_classifier(max_fpr=max_fpr)
         elif build_voting:
@@ -507,13 +486,16 @@ class ChurnTrainer:
 
 
 if __name__ == "__main__":
+    from src.load_data import DataProcessor
+
     parser = argparse.ArgumentParser(description="Train churn models")
-    parser.add_argument("--data", type=str, default="data/churn.csv", help="path to CSV dataset")
-    parser.add_argument("--quick", action="store_true", help="Use saved best params from cofnig/best_params.json to fit pipelines (no CV)")
+    parser.add_argument("--data", type=str, default=os.path.join("data", "dataset.csv"), help="path to CSV dataset")
+    parser.add_argument("--quick", action="store_true", help="Use saved best params from config/best_params.json (no grid search)")
     parser.add_argument("--model-dir", type=str, default="models")
     parser.add_argument("--results-dir", type=str, default="results")
     args = parser.parse_args()
 
-    df = pd.read_csv(args.data)
+    proc = DataProcessor(args.data)
+    df = proc.preprocess()
     trainer = ChurnTrainer(df, model_dir=args.model_dir, results_dir=args.results_dir)
     trainer.run_all(train_xgb=True, train_lgbm=True, train_dt=True, build_voting=True, quick=args.quick)
